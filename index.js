@@ -25,19 +25,22 @@ function log(level, message, data = {}) {
 // ─── Transformation Brevo → ImmoFacile ──────────────────────────────────────
 function transformContact(brevoPayload) {
   const attr = brevoPayload.attributes || {};
+
+  // Toutes les infos projet + notes regroupées dans le champ "comment"
+  const commentParts = [];
+  if (attr.SOURCE)      commentParts.push(`Source : ${attr.SOURCE}`);
+  if (attr.TYPE_PROJET) commentParts.push(`Projet : ${attr.TYPE_PROJET}`);
+  if (attr.BUDGET)      commentParts.push(`Budget : ${attr.BUDGET}`);
+  if (attr.VILLE)       commentParts.push(`Ville : ${attr.VILLE}`);
+  if (attr.NOTES)       commentParts.push(`Notes : ${attr.NOTES}`);
+  commentParts.push(`Reçu le : ${new Date().toLocaleString('fr-FR')}`);
+
   return {
-    firstName  : attr.PRENOM      || null,
-    lastName   : attr.NOM         || null,
-    email      : brevoPayload.email || null,
-    phone      : attr.TELEPHONE   || null,
-    source     : attr.SOURCE      || 'brevo',
-    project: {
-      type   : attr.TYPE_PROJET  || null,   // achat / vente / location
-      budget : attr.BUDGET       || null,
-      city   : attr.VILLE        || null,
-    },
-    notes      : attr.NOTES       || null,
-    receivedAt : new Date().toISOString(),
+    firstname : attr.PRENOM    || null,
+    lastname  : attr.NOM       || null,
+    email     : brevoPayload.email || null,
+    phone     : attr.TELEPHONE || null,
+    comment   : commentParts.join(' | '),
   };
 }
 
@@ -50,8 +53,8 @@ async function sendToImmoFacile(lead, attempt = 1) {
     const response = await fetch(process.env.IMMOFACILE_API_URL, {
       method : 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        'X-Api-Key'   : process.env.IMMOFACILE_API_KEY,  // adapte le nom du header si besoin
+        'Content-Type' : 'application/json',
+        'Authorization': `Bearer ${process.env.IMMOFACILE_API_KEY}`,
       },
       body: JSON.stringify(lead),
     });
@@ -63,16 +66,16 @@ async function sendToImmoFacile(lead, attempt = 1) {
 
     const result = await response.json().catch(() => ({}));
     log('info', 'Lead transmis avec succès à ImmoFacile', {
-      email   : lead.email,
+      email  : lead.email,
       attempt,
-      immoId  : result.id || null,
+      immoId : result.id || null,
     });
     return result;
 
   } catch (err) {
     log('warn', `Tentative ${attempt}/${MAX_ATTEMPTS} échouée`, {
-      email  : lead.email,
-      error  : err.message,
+      email : lead.email,
+      error : err.message,
     });
 
     if (attempt < MAX_ATTEMPTS) {
@@ -80,7 +83,7 @@ async function sendToImmoFacile(lead, attempt = 1) {
       return sendToImmoFacile(lead, attempt + 1);
     }
 
-    throw err; // toutes les tentatives épuisées
+    throw err;
   }
 }
 
@@ -109,7 +112,7 @@ app.post('/webhook/brevo', async (req, res) => {
 
   log('info', 'Webhook Brevo reçu', { email: payload.email, source: payload.attributes?.SOURCE });
 
-  // 3. Transformation + envoi (réponse immédiate à Brevo, traitement en arrière-plan)
+  // 3. Réponse immédiate à Brevo, traitement en arrière-plan
   res.status(200).json({ received: true });
 
   try {
@@ -120,7 +123,6 @@ app.post('/webhook/brevo', async (req, res) => {
       email : payload.email,
       error : err.message,
     });
-    // Le lead est perdu ici — voir README pour mettre en place une alerte email
   }
 });
 
