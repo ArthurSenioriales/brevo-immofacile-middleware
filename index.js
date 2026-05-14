@@ -4,13 +4,20 @@ const app = express();
 app.use(express.json());
 
 // ─── Vérification de l'environnement au démarrage ───────────────────────────
-const REQUIRED_ENV = ['IMMOFACILE_API_URL', 'IMMOFACILE_API_KEY', 'WEBHOOK_SECRET'];
+const REQUIRED_ENV = [
+  'IMMOFACILE_SITE_ID',
+  'IMMOFACILE_LOGIN',
+  'IMMOFACILE_PASSWORD',
+  'WEBHOOK_SECRET'
+];
 for (const key of REQUIRED_ENV) {
   if (!process.env[key]) {
     console.error(`❌ Variable d'environnement manquante : ${key}`);
     process.exit(1);
   }
 }
+
+const IMMOFACILE_BASE_URL = 'https://v2.immo-facile.com/api';
 
 // ─── Utilitaire de log ───────────────────────────────────────────────────────
 function log(level, message, data = {}) {
@@ -20,6 +27,35 @@ function log(level, message, data = {}) {
     message,
     ...data
   }));
+}
+
+// ─── Récupération du token ImmoFacile (Basic Auth) ──────────────────────────
+async function getImmoFacileToken() {
+  const credentials = Buffer.from(
+    `${process.env.IMMOFACILE_LOGIN}:${process.env.IMMOFACILE_PASSWORD}`
+  ).toString('base64');
+
+  const response = await fetch(
+    `${IMMOFACILE_BASE_URL}/client/token/site?site_id=${process.env.IMMOFACILE_SITE_ID}`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${credentials}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Impossible d'obtenir le token ImmoFacile : ${response.status} ${body}`);
+  }
+
+  const data = await response.json();
+  // Le token est généralement dans data.token ou data.access_token
+  const token = data.token || data.access_token || data;
+  log('info', 'Token ImmoFacile obtenu avec succès');
+  return token;
 }
 
 // ─── Transformation Brevo → ImmoFacile ──────────────────────────────────────
@@ -36,10 +72,10 @@ function transformContact(brevoPayload) {
   commentParts.push(`Reçu le : ${new Date().toLocaleString('fr-FR')}`);
 
   return {
-    firstname : attr.PRENOM    || null,
-    lastname  : attr.NOM       || null,
+    firstname : attr.PRENOM        || null,
+    lastname  : attr.NOM           || null,
     email     : brevoPayload.email || null,
-    phone     : attr.TELEPHONE || null,
+    phone     : attr.TELEPHONE     || null,
     comment   : commentParts.join(' | '),
   };
 }
@@ -50,14 +86,21 @@ async function sendToImmoFacile(lead, attempt = 1) {
   const RETRY_DELAY_MS = 2000;
 
   try {
-    const response = await fetch(process.env.IMMOFACILE_API_URL, {
-      method : 'POST',
-      headers: {
-        'Content-Type' : 'application/json',
-        'Authorization': `Bearer ${process.env.IMMOFACILE_API_KEY}`,
-      },
-      body: JSON.stringify(lead),
-    });
+    // 1. Obtenir un token frais à chaque envoi
+    const token = await getImmoFacileToken();
+
+    // 2. Créer le contact
+    const response = await fetch(
+      `${IMMOFACILE_BASE_URL}/site/customer?site_id=${process.env.IMMOFACILE_SITE_ID}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type' : 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify(lead),
+      }
+    );
 
     if (!response.ok) {
       const body = await response.text();
@@ -87,7 +130,7 @@ async function sendToImmoFacile(lead, attempt = 1) {
   }
 }
 
-// ─── Route de santé (Scalingo l'utilise pour vérifier que l'app tourne) ─────
+// ─── Route de santé ──────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'brevo-immofacile-middleware' });
 });
@@ -95,7 +138,7 @@ app.get('/', (req, res) => {
 // ─── Webhook principal ───────────────────────────────────────────────────────
 app.post('/webhook/brevo', async (req, res) => {
 
-  // 1. Vérification du secret partagé (header envoyé par Brevo)
+  // 1. Vérification du secret partagé
   const secret = req.headers['x-webhook-secret'];
   if (secret !== process.env.WEBHOOK_SECRET) {
     log('warn', 'Tentative sans secret valide', { ip: req.ip });
@@ -104,13 +147,16 @@ app.post('/webhook/brevo', async (req, res) => {
 
   const payload = req.body;
 
-  // 2. Validation minimale du payload
+  // 2. Validation minimale
   if (!payload || !payload.email) {
     log('warn', 'Payload invalide reçu (email manquant)', { payload });
     return res.status(400).json({ error: 'Email manquant dans le payload' });
   }
 
-  log('info', 'Webhook Brevo reçu', { email: payload.email, source: payload.attributes?.SOURCE });
+  log('info', 'Webhook Brevo reçu', {
+    email  : payload.email,
+    source : payload.attributes?.SOURCE
+  });
 
   // 3. Réponse immédiate à Brevo, traitement en arrière-plan
   res.status(200).json({ received: true });
